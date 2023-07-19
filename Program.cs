@@ -1,19 +1,16 @@
 ﻿using ClosedXML.Excel;
-using DocumentFormat.OpenXml.Spreadsheet;
-using DocumentFormat.OpenXml.Wordprocessing;
 using OSIsoft.AF;
 using OSIsoft.AF.Analysis;
 using OSIsoft.AF.Asset;
 using OSIsoft.AF.UnitsOfMeasure;
 using System;
 using System.Collections.Generic;
-using System.ComponentModel.Composition.Primitives;
 using System.Data;
 using System.Linq;
 using System.Net;
-using System.Reflection;
-using System.Security.Policy;
 using ValueKit_ExtractionUI;
+using System.IO;
+using Microsoft.Extensions.Configuration;
 
 namespace ConsoleApp_Tests_Xavier
 {
@@ -26,53 +23,61 @@ namespace ConsoleApp_Tests_Xavier
             Console.ForegroundColor= ConsoleColor.White;           
             string unitkit = Console.ReadLine();
 
-            string pisystem = "pre-sales-pi";
-            string myDB = "Refinery Process Unit Kits";
-            string username = "pre-sales-pi\\xavier.fourrage";
-            string password = "Welcome123!";
-            bool credentials = true;
-            if (util.Confirm("Default PI System is: pre-sales-pi. AF Database is: Refinery Process Unit Kits . Would you like to rename those?"))
-            {
-                util.WriteInBlue("Enter the PI System name:");
-                Console.ForegroundColor = ConsoleColor.White;
-                pisystem = Console.ReadLine();
-                util.WriteInBlue("Enter the AF Database name:");
-                Console.ForegroundColor = ConsoleColor.White;
-                myDB = Console.ReadLine();
-                if (!util.Confirm("Connect with your current windows user?"))
-                {
-                    util.WriteInBlue("Username:");
-                    Console.ForegroundColor = ConsoleColor.White;
-                    username = Console.ReadLine();
+            /*******************READING THE APPSETTINGS FILE****************/
+            var builder = new ConfigurationBuilder();
+            builder.SetBasePath(Directory.GetCurrentDirectory())
+                   .AddJsonFile("appSettings.json", optional: false, reloadOnChange: true);
 
-                    util.WriteInBlue("Username password:");
-                    Console.ForegroundColor = ConsoleColor.White;
-                    password = Console.ReadLine();
-                }
-                else
-                {
-                    credentials=false;
-                }
-            };
+            IConfiguration config = builder.Build();
+            string pisystem = config["pisystem"];
+            string myDB = config["myDB"];
+            string username = config["username"];
+            string password = config["password"];
+            bool credentials = bool.Parse(config["credentials"]);
+
+            util.WriteInBlue("Default PI System is: " + pisystem);
+            util.WriteInBlue("Default AF Database is: " + myDB);
+            util.WriteInBlue("Using your current username & password: " + credentials);
+            /****************************************************************/
 
             PISystem pisys=PIsystemConnect(pisystem, username, password,credentials);
             if (pisys != null)
             {
-                util.WriteInBlue("Connected to " + pisystem);
+                util.WriteInGreen("Connected to " + pisystem);
                 AFDatabase afdB = GetAFdatabase(pisystem, myDB);
+
                 if (afdB != null)
                 {
-                    util.WriteInBlue("Connected to " + afdB);
-                    XLWorkbook wb = new XLWorkbook();                
-                    AFElement UnitKit_Search = (AFElement.FindElements(afdB, null, unitkit, AFSearchField.Name, true, AFSortField.Name, AFSortOrder.Ascending, 10000).Count > 1) ? AFElement.FindElements(afdB, null, unitkit, AFSearchField.Name, true, AFSortField.Name, AFSortOrder.Ascending, 10000)[0] : null;
+                    util.WriteInGreen("Connected to " + afdB);
+                    XLWorkbook wb = new XLWorkbook();
+                    AFNamedCollectionList<AFElement> listafele = AFElement.FindElements(afdB, null, unitkit, AFSearchField.Name, true, AFSortField.Name, AFSortOrder.Ascending, 10000);                 
+                    AFElement UnitKit_Search = (listafele.Count > 0) ? listafele[0] : null;
+                    string outputFolder = Path.GetDirectoryName(AppDomain.CurrentDomain.BaseDirectory);
 
-                    if (UnitKit_Search != null)
+                    if (UnitKit_Search!= null)
                     {
                         /*******************CREATING THE UOM AF Database WORKSHEET****************/
                         List<UOM> uOM_list = GetCustomUOM(pisystem);
                         DataTable dt_UOM = UomDataTable(uOM_list);
                         wb = AddNewWorkSheetToWb(wb, dt_UOM, "UOM AF Database");
                         /**********************************************************************/
+                      
+                        /*******************CREATING THE CONFIGURATION ELEMENT WORKSHEET****************/
+                        AFElement configElement = GetConfigurationElement(afdB);
+
+                        util.WriteInYellow("Exporting the config element...");
+                        ExportToXML(configElement, pisystem, "_Configuration_AFElement.xml");
+                        util.WriteInBlue("_Configuration element has been exported under _Configuration_AFElement.xml");
+
+                        DataTable dt_configElement = ConfigElementDataTable(configElement);
+                        wb = AddNewWorkSheetToWb(wb, dt_configElement, "Configuration Element");
+                        /**********************************************************************/
+
+                        AFElements afelements = UnitKit_Search.Elements;
+                        List<AFElement> afelList = GetElementsRecursively(afelements);
+/*                      afelList.Insert(0, UnitKit_Search);
+                        afelList.Insert(0, UnitKit_Search.Parent);*/
+                        afelList.InsertRange(0, new[] { UnitKit_Search.Parent, UnitKit_Search });
 
                         /*******************CREATING THE CATEGORY WORKSHEET****************/
                         AFCategories afcat = ListAttributeCategories(afdB);
@@ -82,52 +87,25 @@ namespace ConsoleApp_Tests_Xavier
                         /**********************************************************************/
 
                         /*******************CREATING THE ENUMERATION SETS WORKSHEET****************/
-                        AFNamedCollection<AFEnumerationSet> listenumSets = ListEnumSets(afdB);
+                        List<AFEnumerationSet> listenumSets = ListEnumSets(afelList,afdB);
                         DataTable dt_enumSet = EnumerationSetsDataTable(listenumSets);
                         wb = AddNewWorkSheetToWb(wb, dt_enumSet, "AF Enumeration Sets");
                         /**********************************************************************/
 
-                        /*******************CREATING THE CONFIGURATION ELEMENT WORKSHEET****************/
-                        AFElement configElement = GetConfigurationElement(afdB);
-
-                        util.WriteInBlue("Exporting the config element...");
-                        ExportToXML(configElement, pisystem, "_Configuration_AFElement.xml");
-                        util.WriteInBlue("_Configuration element has been exported under _Configuration_AFElement.xml");
-
-                        DataTable dt_configElement = ConfigElementDataTable(configElement);
-                        wb = AddNewWorkSheetToWb(wb, dt_configElement, "Configuration Element");
-                        /**********************************************************************/
-
                         /*******************CREATING THE ELMENT TEMPLATES WORKSHEET****************/
-                        util.WriteInBlue("Exporting the " + unitkit + " element...");
+                        util.WriteInYellow("Exporting the " + unitkit + " element...");
                         ExportToXML(UnitKit_Search, pisystem, unitkit + "_AFElement.xml");
-                        util.WriteInBlue(unitkit + " has been exported under " + unitkit + "_AFElement.xml");
-
-                        AFElements afelements = UnitKit_Search.Elements;
-                        List<AFElement> afelList = GetElementsRecursively(afelements);
-                        afelList.Insert(0, UnitKit_Search);
-                        afelList.Insert(0, UnitKit_Search.Parent);
+                        util.WriteInBlue(unitkit + " element has been exported under " + unitkit + "_AFElement.xml");
                         List<AFElementTemplate> afelTempList = new List<AFElementTemplate>();
                         foreach (AFElement afel in afelList)
                         {
-                            if (GetElementTemplate(afel) != null)
+                            AFElementTemplate template = GetElementTemplate(afel);
+                            while (template != null)
                             {
-                                if (!afelTempList.Contains(GetElementTemplate(afel)))
-                                {
-                                    afelTempList.Add(GetElementTemplate(afel));
-                                    if (GetElementTemplate(afel).BaseTemplate != null && !afelTempList.Contains(GetElementTemplate(afel).BaseTemplate))
-                                    {
-                                        afelTempList.Add(GetElementTemplate(afel).BaseTemplate);
-                                        if (GetElementTemplate(afel).BaseTemplate.BaseTemplate != null && !afelTempList.Contains(GetElementTemplate(afel).BaseTemplate.BaseTemplate))
-                                        {
-                                            afelTempList.Add(GetElementTemplate(afel).BaseTemplate.BaseTemplate);
-                                            if (GetElementTemplate(afel).BaseTemplate.BaseTemplate.BaseTemplate != null && !afelTempList.Contains(GetElementTemplate(afel).BaseTemplate.BaseTemplate.BaseTemplate))
-                                            {
-                                                afelTempList.Add(GetElementTemplate(afel).BaseTemplate.BaseTemplate.BaseTemplate);
-                                            }
-                                        }
-                                    }
-                                }
+                                if (!afelTempList.Contains(template))
+                                    afelTempList.Add(template);
+
+                                template = template.BaseTemplate;
                             }
                         }
                         //remove duplicates if any
@@ -148,18 +126,24 @@ namespace ConsoleApp_Tests_Xavier
                         /**********************************************************************/
 
                         /*******************CREATING THE AF TABLE WORKSHEETS****************/
+                        util.WriteInYellow("Exporting the AF Tables...");
                         List<AFTable> aFTables = GetAFTablesList(afelList, afdB);
                         foreach (AFTable aFTable in aFTables)
                         {
                             DataTable dt_table = DataTable_AFTable(aFTable);
                             string sheetname = aFTable.Name;
                             wb = AddNewWorkSheetToWb(wb, dt_table, sheetname);
+                            util.WriteInYellow("Exporting the " + aFTable.Name + " AF table...");
+                            ExportToXML(aFTable, pisystem, aFTable.Name+"_AFTable.xml");
+                            util.WriteInBlue(aFTable.Name + " AF Table has been exported under " + aFTable.Name + "_AFTable.xml");
+
                         }
                         /**********************************************************************/
 
                         string date = DateTime.Now.ToString("yyyy MMMM dd_HH-mm-ss");
                         wb.SaveAs(unitkit + "_AFexport_" + date + ".xlsx");
                         util.WriteInBlue("Output has been saved under: " + unitkit + "_AFexport_" + date + ".xlsx");
+                        MoveFilesToFolder(outputFolder,unitkit);
                         util.PressEnterToExit();
                     }
                     else
@@ -178,8 +162,7 @@ namespace ConsoleApp_Tests_Xavier
             {
                 util.WriteInRed("Could not connect to PI System "+pisystem);
                 util.PressEnterToExit();
-            }
-            
+            }          
             
         }
         public static void ExportToXML(object configElement, string pisystem, string filename)
@@ -202,31 +185,25 @@ namespace ConsoleApp_Tests_Xavier
             {               
                 foreach (AFAttribute att in afel.Attributes)
                 {
-                    if(att.DataReferencePlugIn!=null)
-                    {
-                        if (att.DataReferencePlugIn.ToString() == "Table Lookup")
+/*                    if(att.DataReferencePlugIn!=null)
+                    {*/
+                        if (att.DataReferencePlugIn?.ToString() == "Table Lookup")
                         {
-                            var attrConfigString = att.ConfigString;
-                            int pFrom = attrConfigString.LastIndexOf("FROM")+5;
-                            int pTo = attrConfigString.IndexOf(" WHERE");
+                        var attrConfigString = att.ConfigString;
+                        int pFrom = attrConfigString.LastIndexOf("FROM") + 5;
+                        int pTo = attrConfigString.IndexOf(" WHERE");
 
-                            String result = attrConfigString.Substring(pFrom, pTo - pFrom);
-                            
-                            if (result.First() =='[')
-                            {
-                                result= result.Substring(1);
-                            }
-                      
-                            if (result.Last() == ']')
-                            {
-                                result = result.Remove(result.Length - 1, 1);
-                            }                          
-                            AFTable aftable = (AFTable.FindTables(afdb, result, AFSearchField.Name, AFSortField.Name, AFSortOrder.Descending, 100).Count>0)? 
+                        string result = attrConfigString.Substring(pFrom, pTo - pFrom)
+                                                       .TrimStart('[')
+                                                       .TrimEnd(']');
+
+                        AFTable aftable = (AFTable.FindTables(afdb, result, AFSearchField.Name, AFSortField.Name, AFSortOrder.Descending, 100).Count>0)? 
                                               AFTable.FindTables(afdb, result, AFSearchField.Name, AFSortField.Name, AFSortOrder.Descending, 100)[0]:null;
-                            if (aftable != null)
-                            { aftableList.Add(aftable); }
-                        }                        
+
+                        aftableList.AddRange(aftable != null ? new[] { aftable } : Enumerable.Empty<AFTable>());
+
                     }
+                    /*}*/
                 }
             }  
             aftableList=aftableList.Distinct().ToList();
@@ -526,18 +503,27 @@ namespace ConsoleApp_Tests_Xavier
             return AFCategoriesList;
         }
       
-        public static AFNamedCollection<AFEnumerationSet> ListEnumSets(AFDatabase AFdB)
+        public static List<AFEnumerationSet> ListEnumSets(List<AFElement> afelList, AFDatabase afdb)
         {
-            AFNamedCollection<AFEnumerationSet> AFEnumSetList = AFdB.EnumerationSets;
-/*            foreach (AFEnumerationSet enumset in AFEnumSetList)
-            {              
-                    Console.ForegroundColor = ConsoleColor.Blue;
-                    Console.WriteLine(enumset.Name);
-                    *//*ListEnumerationSetValues(enumset);*//*              
-            }*/
-        return AFEnumSetList;
+            List<AFEnumerationSet> AFEnumSetList = new List<AFEnumerationSet>();
+
+            foreach (AFElement afel in afelList)
+            {
+                foreach (AFAttribute att in afel.Attributes)
+                {
+                    if (att.Type.FullName == "OSIsoft.AF.Asset.AFEnumerationValue" &&
+                        att.TypeQualifier is AFEnumerationSet afenum && afenum.Name != "System")
+                    {
+                        if (!AFEnumSetList.Contains(afenum))
+                        {
+                            AFEnumSetList.Add(afenum);
+                        }
+                    }
+                }
+            }
+            return AFEnumSetList;
         }
-        public static DataTable EnumerationSetsDataTable(AFNamedCollection<AFEnumerationSet> AFEnumSetList)
+        public static DataTable EnumerationSetsDataTable(List<AFEnumerationSet> AFEnumSetList)
         {
             DataTable AFEnumerationSetsList = new DataTable();
             AFEnumerationSetsList.Columns.Add("Selected(x)", typeof(string));
@@ -671,14 +657,7 @@ namespace ConsoleApp_Tests_Xavier
         }
         public static AFElementTemplate GetElementTemplate(AFElement afel)
         {
-            if (afel.Template != null)
-            {              
-                return afel.Template;
-            }
-            else {
-                return null;
-            }
-
+            return afel.Template != null ? afel.Template : null;
         }
         public static DataTable ElementTemplateListDataTable(List<AFElementTemplate> eltemplList)
         {
@@ -932,12 +911,6 @@ namespace ConsoleApp_Tests_Xavier
             AFNamedCollectionList<AFElementTemplate> aFEventFrameTemplates = new AFNamedCollectionList<AFElementTemplate>();
             aFEventFrameTemplates = AFElementTemplate.FindElementTemplates(mydB, "*GTP.Recommendation*", AFSearchField.Name, AFSortField.Name, AFSortOrder.Descending, 500);
 
-           /* foreach (AFElementTemplate aFEventFrameTemplate in aFEventFrameTemplates)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("Event Frame template name: " + aFEventFrameTemplate.Name);
-                GetAttributeTemplate(aFEventFrameTemplate);
-            }*/
             return aFEventFrameTemplates.ToList();
         }
         public static DataTable EventFrameTemplateDataTable(List<AFElementTemplate> eftempList)
@@ -1055,6 +1028,32 @@ namespace ConsoleApp_Tests_Xavier
                 }
                 }
                 return dt;
+        }
+        public static void MoveFilesToFolder(string outputFolderPath,string unitkit)
+        {
+            string currentDate = DateTime.Now.ToString("yyyy MMMM dd_HH-mm-ss");
+            string folderName = $"{unitkit}_AFexport_{currentDate}";
+
+            string folderPath = Path.Combine(outputFolderPath, folderName);
+
+            // Create the folder if it doesn't exist
+            if (!Directory.Exists(folderPath))
+            {
+                Directory.CreateDirectory(folderPath);
+            }
+
+            // Move files to the created folder
+            string[] files = Directory.GetFiles(Directory.GetCurrentDirectory());
+            foreach (string file in files)
+            {
+                if (file.Contains(unitkit) || file.Contains("_AFTable") || file.Contains("_Configuration"))
+                {
+                    string fileName = Path.GetFileName(file);
+                    string destinationPath = Path.Combine(folderPath, fileName);
+                    File.Move(file, destinationPath);
+                }
+               
+            }
         }
     }
 }
