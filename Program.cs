@@ -37,7 +37,7 @@ namespace ConsoleApp_Tests_Xavier
 
             util.WriteInBlue("Default PI System is: " + pisystem);
             util.WriteInBlue("Default AF Database is: " + myDB);
-            util.WriteInBlue("Using your current username & password: " + credentials);
+            util.WriteInBlue("Using the specified username & password: " + credentials);
             /****************************************************************/
 
             PISystem pisys=PIsystemConnect(pisystem, username, password,credentials);
